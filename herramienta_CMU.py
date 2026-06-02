@@ -118,9 +118,14 @@ ALIAS_RECURSOS = {
     "FISIOTERAPIA": "FISIOTERAPIA",
 }
 
-REGEX_FECHA_AGENDA = re.compile(
-    r'(?P<fecha>\d{1,2}/\d{1,2}/\d{4})',
+
+REGEX_FECHA_UN_DIA = re.compile(
+    r'Agenda\s+de\s+Citas.*?D[ií]a[:\s]+(?P<fecha>\d{1,2}/\d{1,2}/(?:\d{2}|\d{4}))',
     re.IGNORECASE,
+)
+
+REGEX_FECHA_MULTIDIA = re.compile(
+    r'^(?P<fecha>\d{1,2}/\d{1,2}/\d{4})$'
 )
 
 REGEX_MEDICO = re.compile(
@@ -353,60 +358,147 @@ def rango_fechas(inicio: date, fin: date) -> List[date]:
 
 @st.cache_data(show_spinner=False)
 def extraer_citas_de_pdf_bytes(nombre_archivo: str, contenido: bytes) -> pd.DataFrame:
+
     registros = []
+
     with pdfplumber.open(io.BytesIO(contenido)) as pdf:
+
         for num_pagina, pagina in enumerate(pdf.pages, start=1):
+
             texto = pagina.extract_text() or ""
+
             if not texto.strip():
                 continue
+
+            # =====================================================
+            # CASO 1: PDF DE UN SOLO DÍA
+            # =====================================================
+
+            fecha_un_dia = None
+
+            match_un_dia = REGEX_FECHA_UN_DIA.search(texto)
+
+            if match_un_dia:
+                fecha_un_dia = match_un_dia.group("fecha")
+
+            fecha_actual = fecha_un_dia
 
             print("\n===================")
             print("PAGINA:", num_pagina)
             print("===================")
 
-            match_fecha = REGEX_FECHA_AGENDA.search(texto)
-            
-            print("Fecha encontrada:", match_fecha.groupdict() if match_fecha else None)
+            # =====================================================
+            # MÉDICO
+            # =====================================================
+
             match_medico = REGEX_MEDICO.search(texto)
-            
-            print("Medico encontrado:", match_medico.groupdict() if match_medico else None)
-            if not match_fecha or not match_medico:
+
+            print(
+                "Medico encontrado:",
+                match_medico.groupdict() if match_medico else None
+            )
+
+            if not match_medico:
                 continue
 
-            fecha_txt = match_fecha.group("fecha")
             codigo_medico = match_medico.group("codigo").strip()
             nombre_medico = match_medico.group("nombre").strip()
             especialidad_pdf = match_medico.group("especialidad").strip()
-            recurso = clasificar_recurso_emo(especialidad_pdf)
-            
-            print("ESPECIALIDAD:", repr(especialidad_pdf)," -> RECURSO:",repr(recurso))
 
-            for linea in texto.splitlines():
+            recurso = clasificar_recurso_emo(especialidad_pdf)
+
+            print(
+                "ESPECIALIDAD:",
+                repr(especialidad_pdf),
+                " -> RECURSO:",
+                repr(recurso)
+            )
+
+            # =====================================================
+            # RECORRER LÍNEAS
+            # =====================================================
+
+            lineas = texto.splitlines()
+
+            lineas_limpias = [
+                l.strip()
+                for l in lineas
+                if l.strip()
+            ]
+
+            for i, linea in enumerate(lineas_limpias):
+
                 linea = linea.strip()
+
+                # =====================================
+                # DETECTAR FECHA DE AGENDA MULTIDÍA
+                # =====================================
+
+                match_fecha_multi = REGEX_FECHA_MULTIDIA.match(linea)
+
+                if match_fecha_multi:
+
+                    fecha_candidata = match_fecha_multi.group("fecha")
+
+                    if (
+                        i + 1 < len(lineas_limpias)
+                        and (
+                            lineas_limpias[i + 1].startswith("Emp")
+                        )
+                    ):
+
+
+                        fecha_actual = fecha_candidata
+
+                        print("CAMBIO FECHA:", fecha_actual)
+
+                        continue
+
+                # =====================================
+                # SI NO HAY FECHA, NO PROCESAR
+                # =====================================
+
+                if fecha_actual is None:
+                    continue
+
+                # =====================================
+                # DETECTAR FILA DE CITA
+                # =====================================
+
                 match_fila = REGEX_FILA_CITA.match(linea)
+
                 if not match_fila:
                     continue
+
                 datos = match_fila.groupdict()
+
                 registros.append(
                     {
                         "archivo": nombre_archivo,
                         "pagina": num_pagina,
-                        "fecha_txt": fecha_txt,
-                        "fecha_dt": convertir_fecha(fecha_txt),
+                        "fecha_txt": fecha_actual,
+                        "fecha_dt": convertir_fecha(fecha_actual),
                         "codigo_medico": codigo_medico,
                         "nombre_medico": nombre_medico,
                         "especialidad_pdf": especialidad_pdf,
                         "especialidad_norm": normalizar_texto(especialidad_pdf),
                         "recurso": recurso,
-                        "recurso_nombre": RECURSOS_EMO.get(recurso, {}).get("nombre", None),
+                        "recurso_nombre": RECURSOS_EMO.get(
+                            recurso,
+                            {}
+                        ).get(
+                            "nombre",
+                            None
+                        ),
                         "cita_no": datos["cita_no"],
                         "consultorio": datos["cons"],
                         "tipo_cita": datos["tipo"],
                         "hora_inicio_txt": datos["hora"],
                     }
                 )
-                
+
     print("TOTAL REGISTROS EXTRAIDOS:", len(registros))
+
     return pd.DataFrame(registros)
 
 
